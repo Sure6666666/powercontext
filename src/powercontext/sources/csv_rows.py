@@ -2,13 +2,11 @@ import csv
 import io
 import json
 from urllib.parse import quote
-from typing import Any
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from .models import Source, SourceMaterialization
 from powercontext.limits import MAX_SOURCE_ID_LENGTH
 from .definitions import SourceDefinition
-# 引入官方投影 Key，这是通关的关键
 from powercontext.sources.projections import TEXT_EVIDENCE_PROJECTION_KEY
 
 class CSVDocumentInput(BaseModel):
@@ -24,31 +22,18 @@ class CSVRowInput(BaseModel):
     values: tuple[str, ...]
 
 class CSVRowSource(Source):
+    # 显式声明所有字段，不搞自动推导，防止框架实例化报错
     source_id: str
     document_id: str
     primary_key: str
     primary_key_value: str
     columns: tuple[str, ...]
     values: tuple[str, ...]
-
     materialization: SourceMaterialization = SourceMaterialization.CAPTURED
 
-    # 使用 before 拦截器，在对象生成前就强制把 name 赋值为 source_id
-    @model_validator(mode="before")
-    @classmethod
-    def compute_source_id(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            doc_id = data.get("document_id")
-            pk_val = data.get("primary_key_value")
-            if doc_id is not None and pk_val is not None:
-                sid = csv_row_source_id(doc_id, pk_val)
-                data["source_id"] = sid
-                data["name"] = sid
-        return data
-
-    # 重写官方框架的 projection 方法
     def projection(self, key: str) -> dict:
         if key == TEXT_EVIDENCE_PROJECTION_KEY:
+            # 构造原表头顺序的字典
             row_dict = dict(zip(self.columns, self.values))
             content_json = json.dumps(row_dict, ensure_ascii=False, separators=(',', ':'))
             return {
@@ -66,13 +51,11 @@ class CSVRowSource(Source):
         raise ValueError(f"Unknown projection key: {key}")
 
 def parse_csv_document(value: CSVDocumentInput) -> tuple[CSVRowInput, ...]:
-    # 1. 校验 document_id 必须非空且不含首尾空白
     if not value.document_id or value.document_id != value.document_id.strip():
         raise ValueError("document_id must not be empty and must not contain leading/trailing whitespace")
     if not value.primary_key:
         raise ValueError("primary_key cannot be empty")
 
-    # 2. 解码，处理 BOM
     try:
         text = value.content.decode('utf-8-sig')
     except UnicodeDecodeError:
@@ -80,7 +63,6 @@ def parse_csv_document(value: CSVDocumentInput) -> tuple[CSVRowInput, ...]:
 
     reader = csv.reader(io.StringIO(text), strict=True)
     
-    # 3. 读取表头并校验
     try:
         header = next(reader)
     except StopIteration:
@@ -98,9 +80,7 @@ def parse_csv_document(value: CSVDocumentInput) -> tuple[CSVRowInput, ...]:
     rows = []
     seen_pks = set()
 
-    # 4. 逐行解析
     for row_num, row in enumerate(reader, start=2):
-        # 忽略完全空白的物理行
         if not row or all(not cell.strip() for cell in row):
             continue
 
@@ -109,15 +89,13 @@ def parse_csv_document(value: CSVDocumentInput) -> tuple[CSVRowInput, ...]:
 
         pk_val = row[pk_index]
         
-        # 主键值不能是空字符串或纯空白
         if not pk_val or not pk_val.strip():
             raise ValueError(f"Row {row_num} primary key is empty or pure whitespace")
-        # 主键值必须唯一
         if pk_val in seen_pks:
             raise ValueError(f"Duplicate primary key: {pk_val}")
         seen_pks.add(pk_val)
 
-        # 提前计算一次 source_id 以触发长度和空格校验（抛错会在这里发生）
+        # 提前调用校验，如果超长或带空格会在此时报错
         csv_row_source_id(value.document_id, pk_val)
 
         rows.append(CSVRowInput(
@@ -131,7 +109,6 @@ def parse_csv_document(value: CSVDocumentInput) -> tuple[CSVRowInput, ...]:
     return tuple(rows)
 
 def csv_row_source_id(document_id: str, primary_key_value: str) -> str:
-    # 单独调用此函数时也要能拦截空格
     if document_id != document_id.strip():
          raise ValueError("document_id contains leading/trailing whitespace")
     
@@ -144,6 +121,7 @@ def csv_row_source_id(document_id: str, primary_key_value: str) -> str:
         
     return sid
 
+# 在这里强行把 name 传给类的构建，彻底绕开 pydantic validator
 CSV_ROW_SOURCE_DEFINITION = SourceDefinition(
     name="csv-row",
     version=1,
