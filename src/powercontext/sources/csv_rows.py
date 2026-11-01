@@ -121,7 +121,6 @@ def csv_row_source_id(document_id: str, primary_key_value: str) -> str:
         
     return sid
 
-# 在这里强行把 name 传给类的构建，彻底绕开 pydantic validator
 CSV_ROW_SOURCE_DEFINITION = SourceDefinition(
     name="csv-row",
     version=1,
